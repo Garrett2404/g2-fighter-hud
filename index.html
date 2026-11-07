@@ -2,79 +2,122 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Fighter HUD Companion</title>
-  <style>
-    body {
-      background: #0a0f0d;
-      color: #00ff66;
-      font-family: monospace;
-      padding: 16px;
-      margin: 0;
-    }
-    h2 { margin-top: 0; border-bottom: 1px solid #00ff66; padding-bottom: 8px; }
-    .card {
-      border: 1px solid #1a3a2a;
-      background: #0f1914;
-      padding: 12px;
-      margin-bottom: 16px;
-      border-radius: 6px;
-    }
-    input, button {
-      background: #050a08;
-      color: #00ff66;
-      border: 1px solid #00ff66;
-      padding: 8px;
-      font-family: monospace;
-      margin: 4px 0;
-      width: 100%;
-      box-sizing: border-box;
-    }
-    button {
-      background: #003314;
-      cursor: pointer;
-      font-weight: bold;
-    }
-    button:active { background: #00ff66; color: #000; }
-    .wp-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 6px 0;
-      border-bottom: 1px dashed #1a3a2a;
-    }
-    .wp-item button { width: auto; padding: 4px 8px; border-color: #ff4444; color: #ff4444; background: transparent; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#050806" />
+  <title>Fighter HUD</title>
 </head>
 <body>
-  <h2>AVIONICS HUD CONTROL</h2>
+  <header class="topbar">
+    <div class="brand">FIGHTER<span>HUD</span></div>
+    <div class="pills">
+      <span id="pill-gps" class="pill">GPS</span>
+      <span id="pill-glasses" class="pill">G2 —</span>
+    </div>
+  </header>
 
-  <div class="card">
-    <div><strong>LIVE TELEMETRY</strong></div>
-    <div id="telemetry-readout">Waiting for bridge...</div>
-    <button id="btn-drop-here" style="margin-top: 8px;">+ DROP PIN AT MY LOCATION</button>
-  </div>
+  <section class="map-wrap">
+    <div id="map" aria-label="Waypoint map"></div>
+    <div class="map-tools">
+      <button id="btn-locate" class="tool" type="button" title="Center on me" aria-label="Center on me">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" /><path d="M12 1v5M12 18v5M1 12h5M18 12h5" /></svg>
+      </button>
+      <button id="btn-fit" class="tool" type="button" title="Show all waypoints" aria-label="Show all waypoints">
+        <svg viewBox="0 0 24 24"><path d="M3 9V3h6M21 9V3h-6M3 15v6h6M21 15v6h-6" /></svg>
+      </button>
+      <button id="btn-layer" class="tool" type="button" title="Map style">DARK</button>
+    </div>
 
-  <div class="card">
-    <div><strong>ADD CUSTOM WAYPOINT</strong></div>
-    <input id="wp-name" type="text" placeholder="Callsign (e.g. HOME, TRUCK)" maxlength="5" />
-    <input id="wp-lat" type="number" step="any" placeholder="Latitude (e.g. 36.9542)" />
-    <input id="wp-lon" type="number" step="any" placeholder="Longitude (e.g. -93.9277)" />
-    <button id="btn-add-wp">SAVE WAYPOINT</button>
-  </div>
+    <div id="map-sheet" class="sheet" hidden>
+      <div class="sheet-title">NEW POINT</div>
+      <div id="sheet-coords" class="sheet-coords"></div>
+      <form id="sheet-form" class="sheet-row">
+        <input id="sheet-name" type="text" autocomplete="off" autocapitalize="characters" aria-label="Waypoint name" />
+        <button type="submit" class="primary">ADD WAYPOINT</button>
+      </form>
+      <div class="sheet-row">
+        <button id="sheet-sim" type="button" class="ghost" hidden>MOVE SIM POSITION HERE</button>
+        <button id="sheet-cancel" type="button" class="ghost">CANCEL</button>
+      </div>
+    </div>
+  </section>
 
-  <div class="card">
-    <div><strong>ACTIVE WAYPOINTS</strong></div>
-    <div id="wp-list"></div>
-  </div>
+  <main class="content">
+    <section class="card">
+      <div class="steer-head">
+        <button id="btn-prev" class="step" type="button" aria-label="Previous waypoint">◀</button>
+        <div class="steer-title">
+          <span class="label">STEERING TO</span>
+          <div id="steer-name" class="steer-name">—</div>
+          <div id="steer-index" class="sub"></div>
+        </div>
+        <button id="btn-next" class="step" type="button" aria-label="Next waypoint">▶</button>
+      </div>
+      <div class="grid four">
+        <div class="stat"><span class="label">RANGE</span><span id="steer-range" class="value">—</span></div>
+        <div class="stat"><span class="label">BEARING</span><span id="steer-brg" class="value">—</span></div>
+        <div class="stat"><span class="label">TURN</span><span id="steer-turn" class="value">—</span></div>
+        <div class="stat"><span class="label">ETE</span><span id="steer-ete" class="value">--:--</span></div>
+      </div>
+      <button id="btn-mark" class="primary block" type="button">+ MARK MY POSITION</button>
+    </section>
 
-  <div class="card">
-    <div><strong>SIMULATOR OVERRIDE (TEST YAW/PITCH)</strong></div>
-    <label>Head Yaw (0-359°): <span id="lbl-yaw">0</span>°</label>
-    <input id="sim-yaw" type="range" min="0" max="359" value="0" />
-    <label>Head Pitch (-45 to +45°): <span id="lbl-pitch">0</span>°</label>
-    <input id="sim-pitch" type="range" min="-45" max="45" value="0" />
-  </div>
+    <section class="card">
+      <h2>GLASSES VIEW</h2>
+      <div class="mirror-frame"><canvas id="mirror" width="576" height="288"></canvas></div>
+      <div class="grid three">
+        <div class="stat"><span class="label">GS MPH</span><span id="t-gs" class="value">—</span></div>
+        <div class="stat"><span class="label">ALT FT</span><span id="t-alt" class="value">—</span></div>
+        <div class="stat"><span class="label">HEADING</span><span id="t-hdg" class="value">000°</span></div>
+        <div class="stat"><span class="label">PITCH</span><span id="t-pitch" class="value">+0°</span></div>
+        <div class="stat"><span class="label">ROLL</span><span id="t-roll" class="value">+0°</span></div>
+        <div class="stat"><span class="label">POSITION</span><span id="t-pos" class="value small">—</span></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>WAYPOINTS <span id="wp-count" class="count">0</span></h2>
+      <div id="wp-list" class="wp-list"></div>
+      <details class="sub-panel">
+        <summary>ADD BY COORDINATES OR MAP LINK</summary>
+        <form id="coord-form" class="stack">
+          <input id="coord-name" type="text" placeholder="Name (optional)" autocomplete="off" autocapitalize="characters" />
+          <input id="coord-text" type="text" placeholder="36.9542, -93.9277 or a map link" autocomplete="off" />
+          <div id="coord-error" class="error"></div>
+          <button type="submit" class="primary">ADD WAYPOINT</button>
+        </form>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>TRAIL</h2>
+      <div class="row between">
+        <span id="trail-info" class="sub"></span>
+        <button id="btn-trail-clear" type="button" class="ghost small">CLEAR</button>
+      </div>
+    </section>
+
+    <details class="card">
+      <summary>GLASSES CONTROLS</summary>
+      <ul class="controls">
+        <li><b>Tap</b> next waypoint</li>
+        <li><b>Swipe up / down</b> previous / next waypoint</li>
+        <li><b>Press and hold</b> mark your position</li>
+        <li><b>Tap, then hold</b> menu: mark, next, previous, delete</li>
+        <li><b>Double-tap</b> exit</li>
+      </ul>
+    </details>
+
+    <details class="card">
+      <summary>SIMULATOR / TEST</summary>
+      <p class="sub">
+        The simulator has no GPS or head tracking. Tap the map and choose “Move sim position here”,
+        then use the sliders to turn your head.
+      </p>
+      <label>Head yaw <span id="lbl-yaw">0</span>°<input id="sim-yaw" type="range" min="0" max="359" value="0" /></label>
+      <label>Head pitch <span id="lbl-pitch">0</span>°<input id="sim-pitch" type="range" min="-45" max="45" value="0" /></label>
+      <label>Head roll <span id="lbl-roll">0</span>°<input id="sim-roll" type="range" min="-60" max="60" value="0" /></label>
+    </details>
+  </main>
 
   <script type="module" src="/src/main.ts"></script>
 </body>

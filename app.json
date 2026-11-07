@@ -3,15 +3,26 @@
   "edition": "202601",
   "name": "Fighter HUD",
   "version": "0.1.0",
-  "min_app_version": "2.0.0",
-  "min_sdk_version": "0.0.9",
+  "min_sdk_version": "0.0.16",
   "entrypoint": "index.html",
   "tagline": "Tactical Avionics HUD & Waypoint Tracker",
-  "description": "Real-time compass tape, pitch ladder, ground speed, and GPS waypoint markers.",
+  "description": "Real-time compass tape, pitch ladder, ground speed, and GPS waypoint markers, with a phone map for placing waypoints.",
   "author": "Garrett",
   "permissions": [
-    "network",
-    "location"
+    {
+      "name": "network",
+      "desc": "Loads map tiles for the waypoint map on your phone.",
+      "whitelist": [
+        "https://server.arcgisonline.com"
+      ]
+    },
+    {
+      "name": "location",
+      "desc": "Shows your speed, altitude and the direction and distance to your waypoints."
+    }
+  ],
+  "supported_languages": [
+    "en"
   ],
   "supported_hardware": [
     "g2"

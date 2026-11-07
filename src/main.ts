@@ -1,333 +1,416 @@
 import {
   waitForEvenAppBridge,
   EvenAppBridge,
+  type AppLocation,
+  AppLocationAccuracy,
   CreateStartUpPageContainer,
-  RebuildPageContainer,
-  TextContainerProperty,
-  TextContainerUpgrade,
+  DeviceConnectType,
+  type DeviceStatus,
+  type EvenHubEvent,
+  IMU_Report_Data,
+  ImageRawDataUpdate,
+  ImageRawDataUpdateResult,
   ImuReportPace,
   OsEventTypeList,
-  AppLocationAccuracy,
+  RebuildPageContainer,
+  StartUpPageCreateResult,
+  TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
-import {
-  Waypoint,
-  getDistanceMeters,
-  getBearingDeg,
-  buildHeadingTape,
-} from './hud-math';
+import { type Waypoint, angleDiff, isValidWaypoint, normalizeDeg } from './hud-math';
+import { HUD_IMAGE, type HudState, MENU, buildPageLayout, hudImageView, hudTexts, renderHudImage } from './hud-display';
+import { initPhone } from './phone';
+
+// Used until the phone reports a GPS fix (and permanently in the simulator, which has no location API).
+const DEFAULT_POSITION = { lat: 36.9542, lon: -93.9277 };
+const STORAGE_WAYPOINTS = 'waypoints';
+const STORAGE_SELECTED = 'selectedWaypoint';
+const MESSAGE_MS = 3000;
+const DELETE_CONFIRM_MS = 5000;
+const HINT_MS = 10_000;
+const SWIPE_COOLDOWN_MS = 300;
+const IMU_DEADBAND_DEG = 0.5;
+// IMU axes: z = heading, y = pitch, x = roll. Flip a sign if the ladder moves the wrong way on the glasses.
+const PITCH_SIGN = 1;
+const ROLL_SIGN = 1;
+
+const state: HudState = {
+  heading: 0,
+  pitch: 0,
+  roll: 0,
+  lat: DEFAULT_POSITION.lat,
+  lon: DEFAULT_POSITION.lon,
+  gps: 'waiting',
+  accuracyM: null,
+  speedMps: 0,
+  altitudeM: null,
+  waypoints: [{ name: 'HOME', ...DEFAULT_POSITION }],
+  selected: 0,
+  message: '',
+  showHints: true,
+  glasses: null,
+};
 
 let bridge: EvenAppBridge | null = null;
-let currentLat = 36.9542;
-let currentLon = -93.9277;
-let currentSpeedMph = 0;
-let currentAltitudeFt = 1300;
+let pageReady = false;
+let rendering = false;
+let renderQueued = false;
+let sentImageKey = '';
+const sentText = new Map<number, string>();
+let messageTimer: ReturnType<typeof setTimeout> | undefined;
+let lastSwipeAt = 0;
+let pendingDelete: { waypoint: Waypoint; until: number } | null = null;
 
-let headYaw = 0;
-let headPitch = 0;
-
-// Render lock to prevent BLE / Simulator packet flooding
-let isRendering = false;
-let renderPending = false;
-
-let waypoints: Waypoint[] = [
-  { name: 'HOME', lat: 36.9542, lon: -93.9277 },
-];
+// A phone UI failure (e.g. the map library) must not take the glasses HUD down with it.
+const phone = (() => {
+  try {
+    return initPhone(state, {
+      select: selectWaypoint,
+      cycle: cycleWaypoint,
+      add: addWaypoint,
+      rename: renameWaypoint,
+      move: moveWaypoint,
+      remove: deleteWaypoint,
+      markHere: markCurrentPosition,
+      nextName: nextMarkName,
+      setSimPosition,
+      setHeadPose,
+    });
+  } catch (err) {
+    console.error('Phone UI failed to start', err);
+    return { refresh() {}, recordFix() {} };
+  }
+})();
 
 async function init() {
-  setupPhoneUI();
+  const b = await waitForEvenAppBridge();
+  bridge = b;
+  await loadSavedWaypoints(b);
 
-  bridge = await waitForEvenAppBridge();
+  // Subscribe before anything optional can fail, so glasses input always works.
+  b.onEvenHubEvent(handleHubEvent);
+  b.onAppLocationChanged(applyFix);
+  b.onDeviceStatusChanged(applyDeviceStatus);
+  b.getDeviceInfo()
+    .then((info) => info && applyDeviceStatus(info.status))
+    .catch((err) => console.warn('Glasses status unavailable', err));
 
-  const saved = await bridge.getLocalStorage('waypoints');
-  if (saved) {
-    try {
-      waypoints = JSON.parse(saved);
-      renderWaypointListUI();
-    } catch (_) {}
-  }
-
-  const layoutProps = {
-    containerTotalNum: 5,
-    textObject: [
-      // 1. Top Scrolling Compass Tape (2 lines, no scrollbar)
-      new TextContainerProperty({
-        containerID: 1,
-        containerName: 'hud_tape',
-        xPosition: 140,
-        yPosition: 4,
-        width: 340,
-        height: 60,
-        isEventCapture: 0,
-        content: 'INITIALIZING...',
-      }),
-      // 2. Center Lubber Caret & Digital Heading
-      new TextContainerProperty({
-        containerID: 2,
-        containerName: 'hud_hdg_box',
-        xPosition: 256,
-        yPosition: 62,
-        width: 100,
-        height: 36,
-        isEventCapture: 0,
-        content: '^000°',
-      }),
-      // 3. Left Telemetry Block
-      new TextContainerProperty({
-        containerID: 3,
-        containerName: 'hud_left',
-        xPosition: 8,
-        yPosition: 100,
-        width: 160,
-        height: 120,
-        isEventCapture: 0,
-        content: 'SPD  0.0 MPH\nALT 1300 FT\nPCH   +0°',
-      }),
-      // 4. Right Telemetry Block
-      new TextContainerProperty({
-        containerID: 4,
-        containerName: 'hud_right',
-        xPosition: 400,
-        yPosition: 100,
-        width: 168,
-        height: 120,
-        isEventCapture: 0,
-        content: 'TGT: HOME',
-      }),
-      // 5. Bottom Status Bar (Holds event capture)
-      new TextContainerProperty({
-        containerID: 5,
-        containerName: 'hud_bottom',
-        xPosition: 138,
-        yPosition: 246,
-        width: 320,
-        height: 38,
-        isEventCapture: 1,
-        content: 'NAV MODE [TAP TO MARK POS]',
-      }),
-    ],
-  };
-
-  await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(layoutProps));
-  await bridge.rebuildPageContainer(new RebuildPageContainer(layoutProps));
-
-  await bridge.startAppLocationUpdates({
-    accuracy: AppLocationAccuracy.High,
-    intervalMs: 1000,
-    distanceFilter: 1,
-  });
-
-  bridge.onAppLocationChanged((loc) => {
-    currentLat = loc.latitude;
-    currentLon = loc.longitude;
-    if (loc.speed != null && loc.speed >= 0) {
-      currentSpeedMph = loc.speed * 2.23694;
-    }
-    if (loc.altitude != null) {
-      currentAltitudeFt = loc.altitude * 3.28084;
-    }
-    requestHudUpdate();
-  });
-
-  await bridge.imuControl(true, ImuReportPace.P200);
-
-  bridge.onEvenHubEvent(async (event) => {
-    const sys = event.sysEvent;
-    const txt = event.textEvent;
-
-    if (sys?.eventType === OsEventTypeList.IMU_DATA_REPORT && sys.imuData) {
-      const y = sys.imuData.y ?? 0;
-      const z = sys.imuData.z ?? 0;
-      headYaw = ((z % 360) + 360) % 360;
-      headPitch = Math.round(y);
-      requestHudUpdate();
-    }
-
-    const isClick =
-      txt?.eventType === OsEventTypeList.CLICK_EVENT ||
-      sys?.eventType === OsEventTypeList.CLICK_EVENT;
-
-    if (isClick) {
-      await dropPinAtCurrentLocation();
-    }
-  });
-
-  requestHudUpdate();
-}
-
-/** Throttles HUD updates so rapid slider/IMU events never overlap or drop frames */
-function requestHudUpdate() {
-  updatePhoneTelemetryUI();
-  if (isRendering) {
-    renderPending = true;
+  const layout = buildPageLayout();
+  const created = await b.createStartUpPageContainer(new CreateStartUpPageContainer(layout));
+  // After a WebView reload (e.g. during development) the startup page already exists: replace it.
+  if (created !== StartUpPageCreateResult.success && !(await b.rebuildPageContainer(new RebuildPageContainer(layout)))) {
+    console.error('Could not create the glasses page', created);
     return;
   }
-  renderLoop();
-}
+  pageReady = true;
+  requestRender();
+  setTimeout(() => {
+    state.showHints = false;
+    requestRender();
+  }, HINT_MS);
 
-async function renderLoop() {
-  if (!bridge) return;
-  isRendering = true;
-
+  // The simulator rejects both of these; the phone sliders stand in for the IMU there.
   try {
-    const hdgStr = Math.round(headYaw).toString().padStart(3, '0');
+    await b.startAppLocationUpdates({ accuracy: AppLocationAccuracy.High, intervalMs: 1000, distanceFilter: 1 });
+  } catch (err) {
+    console.warn('Location API unavailable, using the default position', err);
+    if (state.gps === 'waiting') state.gps = 'unavailable';
+    requestRender();
+  }
+  try {
+    await b.imuControl(true, ImuReportPace.P200);
+  } catch (err) {
+    console.warn('IMU unavailable', err);
+  }
+}
 
-    // 1. Update Top Tape
-    await bridge.textContainerUpgrade(
-      new TextContainerUpgrade({
-        containerID: 1,
-        containerName: 'hud_tape',
-        content: buildHeadingTape(headYaw, currentLat, currentLon, waypoints),
-      })
-    );
-
-    // 2. Update Center Caret & Digital Bearing
-    await bridge.textContainerUpgrade(
-      new TextContainerUpgrade({
-        containerID: 2,
-        containerName: 'hud_hdg_box',
-        content: `^${hdgStr}°`,
-      })
-    );
-
-    if (headPitch >= -20) {
-      const pitchSign = headPitch >= 0 ? `+${headPitch}` : `${headPitch}`;
-      await bridge.textContainerUpgrade(
-        new TextContainerUpgrade({
-          containerID: 3,
-          containerName: 'hud_left',
-          content: `SPD ${currentSpeedMph.toFixed(1)} MPH\nALT ${Math.round(currentAltitudeFt)} FT\nPCH ${pitchSign}°`,
-        })
-      );
-
-      const activeWp = waypoints[waypoints.length - 1];
-      if (activeWp) {
-        const distM = getDistanceMeters(currentLat, currentLon, activeWp.lat, activeWp.lon);
-        const brg = Math.round(getBearingDeg(currentLat, currentLon, activeWp.lat, activeWp.lon));
-        const distStr = distM >= 1000 ? `${(distM / 1000).toFixed(2)}KM` : `${Math.round(distM)}M`;
-
-        await bridge.textContainerUpgrade(
-          new TextContainerUpgrade({
-            containerID: 4,
-            containerName: 'hud_right',
-            content: `TGT: ${activeWp.name}\nBRG: ${brg.toString().padStart(3, '0')}°\nRNG: ${distStr}`,
-          })
-        );
-      }
+function handleHubEvent(event: EvenHubEvent) {
+  const menuItem = event.menuItemClickEvent?.itemID;
+  if (menuItem !== undefined) {
+    if (menuItem === MENU.delete) {
+      armDelete();
+      return;
     }
+    cancelDelete();
+    if (menuItem === MENU.mark) markCurrentPosition();
+    else if (menuItem === MENU.next) cycleWaypoint(1);
+    else if (menuItem === MENU.prev) cycleWaypoint(-1);
+    return;
+  }
+
+  const sys = event.sysEvent;
+  if (sys?.imuData) {
+    if (sys.eventType === OsEventTypeList.IMU_DATA_REPORT) applyImu(sys.imuData);
+    return;
+  }
+  if (sys?.eventType === OsEventTypeList.LONG_PRESS_EVENT) {
+    cancelDelete();
+    markCurrentPosition();
+    return;
+  }
+
+  // Hardware reports taps/swipes on the capture container (textEvent); the simulator uses sysEvent.
+  const input = event.textEvent ?? event.listEvent ?? sys;
+  if (!input) return;
+  switch (input.eventType) {
+    case OsEventTypeList.CLICK_EVENT:
+    case undefined: // The SDK can normalize CLICK_EVENT (0) to undefined.
+      if (!confirmDelete()) cycleWaypoint(1);
+      break;
+    case OsEventTypeList.SCROLL_TOP_EVENT:
+    case OsEventTypeList.SCROLL_BOTTOM_EVENT:
+      if (Date.now() - lastSwipeAt < SWIPE_COOLDOWN_MS) break;
+      lastSwipeAt = Date.now();
+      cancelDelete();
+      cycleWaypoint(input.eventType === OsEventTypeList.SCROLL_TOP_EVENT ? -1 : 1);
+      break;
+    case OsEventTypeList.DOUBLE_CLICK_EVENT:
+      cancelDelete();
+      void bridge?.shutDownPageContainer(1);
+      break;
+  }
+}
+
+function applyImu(data: IMU_Report_Data) {
+  const heading = normalizeDeg(data.z ?? 0);
+  const pitch = PITCH_SIGN * (data.y ?? 0);
+  const roll = ROLL_SIGN * (data.x ?? 0);
+  // Ignore sensor jitter so a still head doesn't keep re-sending the HUD image.
+  if (
+    Math.abs(angleDiff(heading, state.heading)) < IMU_DEADBAND_DEG &&
+    Math.abs(pitch - state.pitch) < IMU_DEADBAND_DEG &&
+    Math.abs(roll - state.roll) < IMU_DEADBAND_DEG
+  ) {
+    return;
+  }
+  state.heading = heading;
+  state.pitch = pitch;
+  state.roll = roll;
+  requestRender();
+}
+
+function applyFix(loc: AppLocation) {
+  state.lat = loc.latitude;
+  state.lon = loc.longitude;
+  state.gps = 'live';
+  state.accuracyM = loc.accuracy ?? null;
+  if (loc.speed != null && loc.speed >= 0) state.speedMps = loc.speed;
+  if (loc.altitude != null) state.altitudeM = loc.altitude;
+  phone.recordFix(loc.latitude, loc.longitude);
+  requestRender();
+}
+
+function applyDeviceStatus(status: DeviceStatus) {
+  state.glasses = {
+    connected: status.connectType === DeviceConnectType.Connected,
+    battery: status.batteryLevel ?? null,
+  };
+  phone.refresh();
+}
+
+/** Coalesces state changes: one render pass at a time, and only changed containers are sent. */
+function requestRender() {
+  phone.refresh();
+  if (!bridge || !pageReady) return;
+  if (rendering) {
+    renderQueued = true;
+    return;
+  }
+  void renderLoop(bridge);
+}
+
+async function renderLoop(b: EvenAppBridge) {
+  rendering = true;
+  try {
+    do {
+      renderQueued = false;
+      await pushImage(b);
+      await pushTexts(b);
+    } while (renderQueued);
+  } catch (err) {
+    console.error('HUD render failed', err);
   } finally {
-    isRendering = false;
-    if (renderPending) {
-      renderPending = false;
-      renderLoop();
-    }
+    rendering = false;
   }
 }
 
-async function dropPinAtCurrentLocation(customName?: string) {
-  if (bridge) {
-    const fix = await bridge.getAppLocation({
-      accuracy: AppLocationAccuracy.High,
-      timeoutMs: 3000,
-    });
-    if (fix) {
-      currentLat = fix.latitude;
-      currentLon = fix.longitude;
-    }
-  }
+async function pushImage(b: EvenAppBridge) {
+  const view = hudImageView(state);
+  const key = JSON.stringify(view);
+  if (key === sentImageKey) return;
+  sentImageKey = key;
+  const result = await b.updateImageRawData(
+    new ImageRawDataUpdate({
+      containerID: HUD_IMAGE.id,
+      containerName: HUD_IMAGE.name,
+      imageData: await renderHudImage(view),
+    })
+  );
+  if (result !== ImageRawDataUpdateResult.success) console.warn('HUD image update failed', result);
+}
 
-  const pinName = customName || `P${waypoints.length}`;
-  waypoints.push({ name: pinName, lat: currentLat, lon: currentLon });
-  await saveWaypoints();
-
-  if (bridge) {
-    await bridge.textContainerUpgrade(
+async function pushTexts(b: EvenAppBridge) {
+  for (const text of hudTexts(state)) {
+    const key = `${text.textColor}|${text.content}`;
+    if (sentText.get(text.id) === key) continue;
+    sentText.set(text.id, key);
+    await b.textContainerUpgrade(
       new TextContainerUpgrade({
-        containerID: 5,
-        containerName: 'hud_bottom',
-        content: `PINNED: ${pinName} (${currentLat.toFixed(4)})`,
+        containerID: text.id,
+        containerName: text.name,
+        content: text.content,
+        textColor: text.textColor,
       })
     );
   }
-  requestHudUpdate();
 }
 
-async function saveWaypoints() {
-  renderWaypointListUI();
-  if (bridge) {
-    await bridge.setLocalStorage('waypoints', JSON.stringify(waypoints));
-  }
+function flash(message: string, durationMs = MESSAGE_MS) {
+  state.message = message;
+  clearTimeout(messageTimer);
+  messageTimer = setTimeout(() => {
+    state.message = '';
+    requestRender();
+  }, durationMs);
+  requestRender();
 }
 
-function setupPhoneUI() {
-  renderWaypointListUI();
-
-  document.getElementById('btn-drop-here')?.addEventListener('click', () => {
-    dropPinAtCurrentLocation();
+function nextMarkName(): string {
+  const used = state.waypoints.flatMap((wp) => {
+    const match = /^P(\d+)$/.exec(wp.name);
+    return match ? [Number(match[1])] : [];
   });
+  return `P${Math.max(0, ...used) + 1}`;
+}
 
-  document.getElementById('btn-add-wp')?.addEventListener('click', async () => {
-    const nameEl = document.getElementById('wp-name') as HTMLInputElement;
-    const latEl = document.getElementById('wp-lat') as HTMLInputElement;
-    const lonEl = document.getElementById('wp-lon') as HTMLInputElement;
+function markCurrentPosition() {
+  if (state.gps === 'waiting') {
+    flash('NO GPS FIX  ·  CANNOT MARK');
+    return;
+  }
+  const name = nextMarkName();
+  state.waypoints.push({ name, lat: state.lat, lon: state.lon });
+  if (state.selected < 0) state.selected = 0;
+  saveWaypoints();
+  flash(`MARKED ${name}   ${state.lat.toFixed(5)}, ${state.lon.toFixed(5)}`);
+}
 
-    const name = nameEl.value.trim().toUpperCase() || `P${waypoints.length}`;
-    const lat = parseFloat(latEl.value);
-    const lon = parseFloat(lonEl.value);
+function cycleWaypoint(step: number) {
+  const count = state.waypoints.length;
+  if (count === 0) {
+    flash('NO WAYPOINTS  ·  HOLD TO MARK');
+    return;
+  }
+  selectWaypoint((state.selected + step + count) % count);
+}
 
-    if (!isNaN(lat) && !isNaN(lon)) {
-      waypoints.push({ name, lat, lon });
-      nameEl.value = '';
-      latEl.value = '';
-      lonEl.value = '';
-      await saveWaypoints();
-      requestHudUpdate();
+function selectWaypoint(index: number) {
+  state.selected = index;
+  persist(STORAGE_SELECTED, String(index));
+  requestRender();
+}
+
+function addWaypoint(waypoint: Waypoint) {
+  if (!isValidWaypoint(waypoint)) return;
+  state.waypoints.push(waypoint);
+  if (state.selected < 0) state.selected = 0;
+  saveWaypoints();
+  flash(`ADDED ${waypoint.name}`);
+}
+
+// Rename/move edit in place so a pending glasses delete still finds the same object.
+function renameWaypoint(index: number, name: string) {
+  const waypoint = state.waypoints[index];
+  if (!waypoint || !name) return;
+  waypoint.name = name;
+  saveWaypoints();
+}
+
+function moveWaypoint(index: number, lat: number, lon: number) {
+  const waypoint = state.waypoints[index];
+  if (!waypoint) return;
+  waypoint.lat = lat;
+  waypoint.lon = lon;
+  saveWaypoints();
+}
+
+/** Only for the simulator, which has no location API. */
+function setSimPosition(lat: number, lon: number) {
+  if (state.gps !== 'unavailable') return;
+  state.lat = lat;
+  state.lon = lon;
+  requestRender();
+}
+
+function setHeadPose(pose: { heading?: number; pitch?: number; roll?: number }) {
+  if (pose.heading !== undefined) state.heading = normalizeDeg(pose.heading);
+  if (pose.pitch !== undefined) state.pitch = pose.pitch;
+  if (pose.roll !== undefined) state.roll = pose.roll;
+  requestRender();
+}
+
+function deleteWaypoint(index: number) {
+  state.waypoints.splice(index, 1);
+  if (index < state.selected) state.selected--;
+  state.selected = Math.min(state.selected, state.waypoints.length - 1);
+  saveWaypoints();
+}
+
+// Deleting from the glasses needs a confirming tap because there is no undo.
+function armDelete() {
+  const waypoint = state.waypoints[state.selected];
+  if (!waypoint) {
+    flash('NO WAYPOINTS TO DELETE');
+    return;
+  }
+  pendingDelete = { waypoint, until: Date.now() + DELETE_CONFIRM_MS };
+  flash(`DELETE ${waypoint.name}?  TAP TO CONFIRM`, DELETE_CONFIRM_MS);
+}
+
+/** Returns true when the tap was used to confirm a pending delete. */
+function confirmDelete(): boolean {
+  const waypoint = takePendingDelete();
+  if (!waypoint) return false;
+  const index = state.waypoints.indexOf(waypoint);
+  if (index >= 0) deleteWaypoint(index);
+  flash(`DELETED ${waypoint.name}`);
+  return true;
+}
+
+function cancelDelete() {
+  if (takePendingDelete()) flash('DELETE CANCELLED');
+}
+
+function takePendingDelete(): Waypoint | null {
+  const waypoint = pendingDelete && Date.now() <= pendingDelete.until ? pendingDelete.waypoint : null;
+  pendingDelete = null;
+  return waypoint;
+}
+
+function saveWaypoints() {
+  persist(STORAGE_WAYPOINTS, JSON.stringify(state.waypoints));
+  persist(STORAGE_SELECTED, String(state.selected));
+  requestRender();
+}
+
+function persist(key: string, value: string) {
+  bridge?.setLocalStorage(key, value).catch((err) => console.warn(`Could not save ${key}`, err));
+}
+
+async function loadSavedWaypoints(b: EvenAppBridge) {
+  try {
+    const saved = await b.getLocalStorage(STORAGE_WAYPOINTS);
+    if (saved) {
+      const parsed: unknown = JSON.parse(saved);
+      if (Array.isArray(parsed)) state.waypoints = parsed.filter(isValidWaypoint);
     }
-  });
-
-  const yawSlider = document.getElementById('sim-yaw') as HTMLInputElement;
-  const pitchSlider = document.getElementById('sim-pitch') as HTMLInputElement;
-
-  yawSlider?.addEventListener('input', () => {
-    headYaw = parseInt(yawSlider.value, 10);
-    document.getElementById('lbl-yaw')!.textContent = yawSlider.value;
-    requestHudUpdate();
-  });
-
-  pitchSlider?.addEventListener('input', () => {
-    headPitch = parseInt(pitchSlider.value, 10);
-    document.getElementById('lbl-pitch')!.textContent = pitchSlider.value;
-    requestHudUpdate();
-  });
-}
-
-function updatePhoneTelemetryUI() {
-  const el = document.getElementById('telemetry-readout');
-  if (el) {
-    el.innerHTML = `POS: ${currentLat.toFixed(5)}, ${currentLon.toFixed(5)}<br/>HDG: ${Math.round(headYaw)}° | PCH: ${headPitch}° | SPD: ${currentSpeedMph.toFixed(1)} MPH`;
+    const selected = parseInt(await b.getLocalStorage(STORAGE_SELECTED), 10);
+    // Older versions had no saved selection and steered to the newest waypoint.
+    state.selected =
+      selected >= 0 && selected < state.waypoints.length ? selected : state.waypoints.length - 1;
+  } catch (err) {
+    console.warn('Could not load saved waypoints', err);
   }
-}
-
-function renderWaypointListUI() {
-  const listEl = document.getElementById('wp-list');
-  if (!listEl) return;
-  listEl.innerHTML = '';
-
-  waypoints.forEach((wp, idx) => {
-    const row = document.createElement('div');
-    row.className = 'wp-item';
-    row.innerHTML = `<span><strong>${wp.name}</strong> (${wp.lat.toFixed(4)}, ${wp.lon.toFixed(4)})</span>`;
-
-    const delBtn = document.createElement('button');
-    delBtn.textContent = 'DEL';
-    delBtn.onclick = async () => {
-      waypoints.splice(idx, 1);
-      await saveWaypoints();
-      requestHudUpdate();
-    };
-
-    row.appendChild(delBtn);
-    listEl.appendChild(row);
-  });
+  phone.refresh();
 }
 
 init();

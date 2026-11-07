@@ -6,17 +6,19 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "tsc && vite build",
-    "qr": "evenhub qr --http -i 0.0.0.0 -p 5173",
+    "qr": "evenhub qr --http -p 5173",
     "sim": "evenhub-simulator http://localhost:5173",
     "pack": "npm run build && evenhub pack app.json dist -o hud.ehpk"
   },
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.9"
+    "@evenrealities/even_hub_sdk": "^0.0.16",
+    "leaflet": "^1.9.4"
   },
   "devDependencies": {
-    "@evenrealities/evenhub-cli": "^0.1.5",
-    "@evenrealities/evenhub-simulator": "^0.4.2",
-    "typescript": "^5.6.0",
-    "vite": "^5.4.0"
+    "@evenrealities/evenhub-cli": "^0.2.0",
+    "@evenrealities/evenhub-simulator": "^0.9.5",
+    "@types/leaflet": "^1.9.22",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.6"
   }
 }
