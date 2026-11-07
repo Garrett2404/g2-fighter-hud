@@ -16,14 +16,26 @@ import {
   StartUpPageCreateResult,
   TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
-import { type Waypoint, angleDiff, isValidWaypoint, normalizeDeg } from './hud-math';
-import { HUD_IMAGE, type HudState, MENU, buildPageLayout, hudImageView, hudTexts, renderHudImage } from './hud-display';
+import { type Waypoint, angleDiff, formatRange, isValidWaypoint, normalizeDeg } from './hud-math';
+import {
+  HUD_IMAGE,
+  type HudState,
+  type LatLon,
+  MENU,
+  MIN_ALIGN_M,
+  alignTarget,
+  buildPageLayout,
+  hudImageView,
+  hudTexts,
+  renderHudImage,
+} from './hud-display';
 import { initPhone } from './phone';
 
 // Used until the phone reports a GPS fix (and permanently in the simulator, which has no location API).
 const DEFAULT_POSITION = { lat: 36.9542, lon: -93.9277 };
 const STORAGE_WAYPOINTS = 'waypoints';
 const STORAGE_SELECTED = 'selectedWaypoint';
+const STORAGE_ALIGN_POINT = 'alignPoint';
 const MESSAGE_MS = 3000;
 const DELETE_CONFIRM_MS = 5000;
 const HINT_MS = 10_000;
@@ -35,6 +47,8 @@ const ROLL_SIGN = 1;
 
 const state: HudState = {
   heading: 0,
+  headingAligned: false,
+  alignPoint: null,
   pitch: 0,
   roll: 0,
   lat: DEFAULT_POSITION.lat,
@@ -59,6 +73,10 @@ const sentText = new Map<number, string>();
 let messageTimer: ReturnType<typeof setTimeout> | undefined;
 let lastSwipeAt = 0;
 let pendingDelete: { waypoint: Waypoint; until: number } | null = null;
+// The IMU yaw has an arbitrary zero (no compass); aligning learns the offset to true north.
+// Not saved: the zero can change whenever the glasses restart.
+let rawYaw = 0;
+let headingOffset = 0;
 
 // A phone UI failure (e.g. the map library) must not take the glasses HUD down with it.
 const phone = (() => {
@@ -74,6 +92,10 @@ const phone = (() => {
       nextName: nextMarkName,
       setSimPosition,
       setHeadPose,
+      setAlignPoint,
+      align: alignHeading,
+      resetAlignment,
+      simFix,
     });
   } catch (err) {
     console.error('Phone UI failed to start', err);
@@ -134,6 +156,7 @@ function handleHubEvent(event: EvenHubEvent) {
     if (menuItem === MENU.mark) markCurrentPosition();
     else if (menuItem === MENU.next) cycleWaypoint(1);
     else if (menuItem === MENU.prev) cycleWaypoint(-1);
+    else if (menuItem === MENU.align) alignHeading();
     return;
   }
 
@@ -171,7 +194,9 @@ function handleHubEvent(event: EvenHubEvent) {
 }
 
 function applyImu(data: IMU_Report_Data) {
-  const heading = normalizeDeg(data.z ?? 0);
+  // Track every sample so an align uses the yaw at that instant, even inside the deadband.
+  rawYaw = data.z ?? 0;
+  const heading = normalizeDeg(rawYaw + headingOffset);
   const pitch = PITCH_SIGN * (data.y ?? 0);
   const roll = ROLL_SIGN * (data.x ?? 0);
   // Ignore sensor jitter so a still head doesn't keep re-sending the HUD image.
@@ -342,10 +367,61 @@ function setSimPosition(lat: number, lon: number) {
 }
 
 function setHeadPose(pose: { heading?: number; pitch?: number; roll?: number }) {
-  if (pose.heading !== undefined) state.heading = normalizeDeg(pose.heading);
+  // The yaw slider stands in for the raw IMU yaw, so aligning can be tried in the simulator.
+  if (pose.heading !== undefined) {
+    rawYaw = pose.heading;
+    state.heading = normalizeDeg(rawYaw + headingOffset);
+  }
   if (pose.pitch !== undefined) state.pitch = pose.pitch;
   if (pose.roll !== undefined) state.roll = pose.roll;
   requestRender();
+}
+
+/** Simulated GPS fix from the alignment sim. Real GPS always wins. */
+function simFix(lat: number, lon: number, accuracyM: number | null) {
+  if (state.gps === 'live') return;
+  state.gps = 'unavailable';
+  state.lat = lat;
+  state.lon = lon;
+  state.accuracyM = accuracyM;
+  requestRender();
+}
+
+/** Forgets the true-north alignment, as after the glasses restart. */
+function resetAlignment() {
+  headingOffset = 0;
+  state.headingAligned = false;
+  state.heading = normalizeDeg(rawYaw);
+  requestRender();
+}
+
+function setAlignPoint(point: LatLon | null) {
+  state.alignPoint = point;
+  persist(STORAGE_ALIGN_POINT, point ? JSON.stringify(point) : '');
+  requestRender();
+}
+
+/** Assumes the wearer is looking straight at the align point: its bearing becomes the heading. */
+function alignHeading() {
+  if (!state.alignPoint) {
+    flash('NO ALIGN POINT  ·  SET ONE ON THE PHONE MAP');
+    return;
+  }
+  const target = alignTarget(state);
+  if (!target) {
+    flash('NO GPS FIX  ·  CANNOT ALIGN');
+    return;
+  }
+  if (target.distM < MIN_ALIGN_M) {
+    flash(`ALIGN POINT TOO CLOSE (${formatRange(target.distM)})`);
+    return;
+  }
+  headingOffset = normalizeDeg(target.bearing - rawYaw);
+  state.heading = target.bearing;
+  state.headingAligned = true;
+  // GPS position error turns into this much bearing error at this distance.
+  const errDeg = state.accuracyM ? (Math.atan(state.accuracyM / target.distM) * 180) / Math.PI : null;
+  flash(`HDG ALIGNED  ${String(Math.round(target.bearing) % 360).padStart(3, '0')}°${errDeg === null ? '' : `  ±${Math.max(1, Math.round(errDeg))}°`}`);
 }
 
 function deleteWaypoint(index: number) {
@@ -407,6 +483,11 @@ async function loadSavedWaypoints(b: EvenAppBridge) {
     // Older versions had no saved selection and steered to the newest waypoint.
     state.selected =
       selected >= 0 && selected < state.waypoints.length ? selected : state.waypoints.length - 1;
+    const align = await b.getLocalStorage(STORAGE_ALIGN_POINT);
+    if (align) {
+      const parsed: unknown = JSON.parse(align);
+      if (isValidWaypoint({ name: 'ALIGN', ...(parsed as object) })) state.alignPoint = parsed as LatLon;
+    }
   } catch (err) {
     console.warn('Could not load saved waypoints', err);
   }

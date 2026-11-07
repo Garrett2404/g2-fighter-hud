@@ -6,6 +6,7 @@ export interface MapHandlers {
   onTap(lat: number, lon: number): void;
   onWaypointTap(index: number): void;
   onWaypointDrag(index: number, lat: number, lon: number): void;
+  onAlignDrag(lat: number, lon: number): void;
 }
 
 // Every tile origin here must also be in the app.json network whitelist.
@@ -67,6 +68,8 @@ export class HudMap {
   private readonly trailLine: L.Polyline;
   private readonly waypointLayer = L.layerGroup();
   private waypointKey = '';
+  private readonly alignMarker: L.Marker;
+  private alignKey = '';
   private draft: L.CircleMarker | null = null;
   private lastTrailPoint: L.LatLng | null = null;
   private trailM = 0;
@@ -81,6 +84,16 @@ export class HudMap {
     this.steerLine = L.polyline([], { color: GREEN, weight: 2, dashArray: '6 8', interactive: false }).addTo(this.map);
     this.accuracy = L.circle([0, 0], { radius: 1, color: GREEN, weight: 1, fillOpacity: 0.08, interactive: false });
     this.waypointLayer.addTo(this.map);
+    this.alignMarker = L.marker([0, 0], {
+      icon: L.divIcon({ className: 'wp-icon', html: '<div class="align-pin"><span>ALIGN</span></div>', iconSize: [32, 32], iconAnchor: [16, 16] }),
+      draggable: true,
+      keyboard: false,
+      zIndexOffset: 500,
+    });
+    this.alignMarker.on('dragend', () => {
+      const { lat, lng } = this.alignMarker.getLatLng();
+      handlers.onAlignDrag(lat, lng);
+    });
     this.self = L.marker([0, 0], {
       icon: L.divIcon({ className: 'self-icon', html: SELF_HTML, iconSize: [120, 120], iconAnchor: [60, 60] }),
       interactive: false,
@@ -121,6 +134,12 @@ export class HudMap {
     }
 
     this.syncWaypoints(s);
+    const alignKey = s.alignPoint ? `${s.alignPoint.lat},${s.alignPoint.lon}` : '';
+    if (alignKey !== this.alignKey) {
+      this.alignKey = alignKey;
+      if (s.alignPoint) this.alignMarker.setLatLng([s.alignPoint.lat, s.alignPoint.lon]).addTo(this.map);
+      else this.alignMarker.remove();
+    }
     this.steerLine.setLatLngs(hasPosition && selected ? [position, [selected.lat, selected.lon]] : []);
 
     if (!this.followed) {

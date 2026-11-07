@@ -35,6 +35,7 @@
         <button type="submit" class="primary">ADD WAYPOINT</button>
       </form>
       <div class="sheet-row">
+        <button id="sheet-align" type="button" class="ghost">SET AS ALIGN POINT</button>
         <button id="sheet-sim" type="button" class="ghost" hidden>MOVE SIM POSITION HERE</button>
         <button id="sheet-cancel" type="button" class="ghost">CANCEL</button>
       </div>
@@ -64,6 +65,7 @@
     <section class="card">
       <h2>GLASSES VIEW</h2>
       <div class="mirror-frame"><canvas id="mirror" width="576" height="288"></canvas></div>
+      <div id="sim-truth" class="sim-truth"></div>
       <div class="grid three">
         <div class="stat"><span class="label">GS MPH</span><span id="t-gs" class="value">—</span></div>
         <div class="stat"><span class="label">ALT FT</span><span id="t-alt" class="value">—</span></div>
@@ -71,6 +73,20 @@
         <div class="stat"><span class="label">PITCH</span><span id="t-pitch" class="value">+0°</span></div>
         <div class="stat"><span class="label">ROLL</span><span id="t-roll" class="value">+0°</span></div>
         <div class="stat"><span class="label">POSITION</span><span id="t-pos" class="value small">—</span></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>HEADING ALIGN <span id="align-status" class="count warn">NOT ALIGNED</span></h2>
+      <p id="align-info" class="sub"></p>
+      <p class="sub">
+        The glasses have no compass. Look at the align point so it sits behind the center of the
+        waterline, then choose <b>Align heading</b> from the glasses menu (or tap below).
+        Farther points are more accurate.
+      </p>
+      <div class="row between">
+        <button id="btn-align" type="button" class="primary">ALIGN NOW</button>
+        <button id="btn-align-clear" type="button" class="ghost small" hidden>CLEAR POINT</button>
       </div>
     </section>
 
@@ -102,7 +118,7 @@
         <li><b>Tap</b> next waypoint</li>
         <li><b>Swipe up / down</b> previous / next waypoint</li>
         <li><b>Press and hold</b> mark your position</li>
-        <li><b>Tap, then hold</b> menu: mark, next, previous, delete</li>
+        <li><b>Tap, then hold</b> menu: mark, next, previous, delete, align heading</li>
         <li><b>Double-tap</b> exit</li>
       </ul>
     </details>
@@ -116,6 +132,19 @@
       <label>Head yaw <span id="lbl-yaw">0</span>°<input id="sim-yaw" type="range" min="0" max="359" value="0" /></label>
       <label>Head pitch <span id="lbl-pitch">0</span>°<input id="sim-pitch" type="range" min="-45" max="45" value="0" /></label>
       <label>Head roll <span id="lbl-roll">0</span>°<input id="sim-roll" type="range" min="-60" max="60" value="0" /></label>
+
+      <div class="sub-panel">
+        <span class="label">REALISTIC ALIGNMENT SIM</span>
+        <p class="sub">
+          Behaves like real glasses: the head sensor starts pointed at a random unknown direction and
+          slowly drifts, and GPS wanders. The yaw slider (or dragging the glasses view sideways) becomes
+          where your head <i>really</i> points. The gray tower in the glasses view is the real landmark at
+          your align point, drawn at the G2's true scale. Set an align point first, then start.
+        </p>
+        <label>Gyro drift <span id="lbl-drift">1</span>°/min<input id="sim-drift" type="range" min="0" max="10" step="0.5" value="1" /></label>
+        <label>GPS error <span id="lbl-gpserr">5</span> m<input id="sim-gpserr" type="range" min="0" max="30" value="5" /></label>
+        <button id="btn-sim-start" type="button" class="primary block">START SIM</button>
+      </div>
     </details>
   </main>
 

@@ -24,8 +24,17 @@ export interface GlassesStatus {
   battery: number | null;
 }
 
+export interface LatLon {
+  lat: number;
+  lon: number;
+}
+
 export interface HudState {
+  /** True-north heading once aligned; before that, relative to wherever the IMU happened to zero. */
   heading: number;
+  headingAligned: boolean;
+  /** Distant landmark used to align the heading to true north. */
+  alignPoint: LatLon | null;
   /** Degrees, positive = looking up. */
   pitch: number;
   /** Degrees, positive = right ear down. */
@@ -66,7 +75,7 @@ const TEXT = {
   status: { id: 8, name: 'hud_status', x: 24, y: 248, w: 528, h: 34 },
 } satisfies Record<string, Box>;
 
-export const MENU = { mark: 1, next: 2, prev: 3, delete: 4 } as const;
+export const MENU = { mark: 1, next: 2, prev: 3, delete: 4, align: 5 } as const;
 
 // Closer than this, GPS noise makes the bearing to a waypoint meaningless.
 export const ARRIVED_M = 10;
@@ -118,6 +127,7 @@ export function buildPageLayout(): Partial<CreateStartUpPageContainer> {
         new MenuItemProperty({ itemName: 'Next waypoint', itemID: MENU.next }),
         new MenuItemProperty({ itemName: 'Previous waypoint', itemID: MENU.prev }),
         new MenuItemProperty({ itemName: 'Delete waypoint', itemID: MENU.delete }),
+        new MenuItemProperty({ itemName: 'Align heading', itemID: MENU.align }),
       ],
     }),
   };
@@ -191,6 +201,10 @@ export function hudTexts(s: HudState): TextUpdate[] {
   let status = { content: ' ', textColor: DIM };
   if (s.message) status = { content: s.message, textColor: BRIGHT };
   else if (s.showHints) status = { content: 'TAP  NEXT WPT  ·  HOLD  MARK  ·  DOUBLE-TAP  EXIT', textColor: DIM };
+  else if (!s.headingAligned) {
+    const how = s.alignPoint ? 'LOOK AT POINT  ·  MENU  ALIGN' : 'SET ALIGN POINT ON PHONE';
+    status = { content: `HDG NOT ALIGNED  ·  ${how}`, textColor: DIM };
+  }
 
   return [
     { ...ref(TEXT.gs), content: centerText(gs, valueWidth), textColor: BRIGHT },
@@ -216,6 +230,18 @@ export interface HudImageView {
   pitch: number;
   roll: number;
   markers: TapeMarker[];
+  /** Relative bearing to the align point, -180..180, or null when there is none. */
+  alignRel: number | null;
+}
+
+/** Closer than this, GPS error makes the bearing too uncertain to align on. */
+export const MIN_ALIGN_M = 30;
+
+/** Bearing and distance from the current position to the align point, when it's usable. */
+export function alignTarget(s: HudState): { bearing: number; distM: number } | null {
+  const p = s.alignPoint;
+  if (!p || s.gps === 'waiting') return null;
+  return { bearing: getBearingDeg(s.lat, s.lon, p.lat, p.lon), distM: getDistanceMeters(s.lat, s.lon, p.lat, p.lon) };
 }
 
 const round1 = (v: number) => Math.round(v * 10) / 10;
@@ -230,7 +256,9 @@ export function hudImageView(s: HudState): HudImageView {
       markers.push({ name: wp.name, rel: round1(rel), selected: i === s.selected });
     });
   }
-  return { heading: round1(normalizeDeg(s.heading)), pitch: round1(s.pitch), roll: round1(s.roll), markers };
+  const target = alignTarget(s);
+  const alignRel = target && target.distM >= ARRIVED_M ? round1(angleDiff(target.bearing, s.heading)) : null;
+  return { heading: round1(normalizeDeg(s.heading)), pitch: round1(s.pitch), roll: round1(s.roll), markers, alignRel };
 }
 
 const W = HUD_IMAGE.w;
@@ -244,7 +272,7 @@ const FONT_SMALL = 'bold 12px Helvetica, Arial, sans-serif';
 
 const TAPE_PX_PER_DEG = 4;
 export const TAPE_HALF_DEG = CX / TAPE_PX_PER_DEG;
-const BORESIGHT_Y = 90;
+export const BORESIGHT_Y = 90;
 // Leaves a gap under the heading box so clipped ladder lines don't read as tape marks.
 const LADDER_TOP = 44;
 /** Rungs farther than this from the boresight are hidden rather than clipped mid-label. */
@@ -384,6 +412,35 @@ function drawWaterline(ctx: CanvasRenderingContext2D) {
   ctx.stroke();
 }
 
+function diamond(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
+  ctx.beginPath();
+  ctx.moveTo(x, y - r);
+  ctx.lineTo(x + r, y);
+  ctx.lineTo(x, y + r);
+  ctx.lineTo(x - r, y);
+  ctx.closePath();
+  ctx.stroke();
+}
+
+// Rides the horizon so it sits where a distant landmark would. Only the center of the
+// display is to scale with the real world, so align with the landmark behind the waterline.
+function drawAlignDiamond(ctx: CanvasRenderingContext2D, rel: number, pitch: number) {
+  const y = Math.max(LADDER_TOP + 8, Math.min(H - 8, BORESIGHT_Y + pitch * PITCH_PX_PER_DEG));
+  ctx.lineWidth = 1.5;
+  const limit = TAPE_HALF_DEG - 3;
+  if (Math.abs(rel) <= limit) {
+    diamond(ctx, CX + rel * TAPE_PX_PER_DEG, y, 7);
+    return;
+  }
+  // Off-screen: pin a small diamond to the edge with how far to turn.
+  const right = rel > 0;
+  const x = right ? W - 6 : 6;
+  diamond(ctx, x, y, 5);
+  ctx.font = FONT_SMALL;
+  ctx.textAlign = right ? 'right' : 'left';
+  ctx.fillText(`${Math.round(Math.abs(rel))}°`, right ? x - 8 : x + 8, y);
+}
+
 function drawBankScale(ctx: CanvasRenderingContext2D, roll: number) {
   const polar = (r: number, deg: number): [number, number] => [
     CX + r * Math.sin(deg * RAD),
@@ -409,6 +466,7 @@ export function drawHudImage(ctx: CanvasRenderingContext2D, v: HudImageView) {
   drawLadder(ctx, v.pitch, v.roll);
   drawWaterline(ctx);
   drawBankScale(ctx, v.roll);
+  if (v.alignRel !== null) drawAlignDiamond(ctx, v.alignRel, v.pitch);
   drawTape(ctx, v.heading);
   drawMarkers(ctx, v.markers);
 }

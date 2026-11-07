@@ -2,6 +2,9 @@ import {
   ARRIVED_M,
   HUD_IMAGE,
   type HudState,
+  type LatLon,
+  MIN_ALIGN_M,
+  alignTarget,
   buildPageLayout,
   drawHudImage,
   hudImageView,
@@ -13,6 +16,7 @@ import {
   MAX_NAME_LENGTH,
   MPH_PER_MPS,
   type Waypoint,
+  angleDiff,
   cleanName,
   formatDuration,
   formatRange,
@@ -22,6 +26,7 @@ import {
   parseLatLon,
 } from './hud-math';
 import { HudMap } from './phone-map';
+import { AlignSim, WORLD_PX_PER_DEG } from './align-sim';
 import './phone.css';
 
 export interface PhoneActions {
@@ -35,6 +40,10 @@ export interface PhoneActions {
   nextName(): string;
   setSimPosition(lat: number, lon: number): void;
   setHeadPose(pose: { heading?: number; pitch?: number; roll?: number }): void;
+  setAlignPoint(point: LatLon | null): void;
+  align(): void;
+  resetAlignment(): void;
+  simFix(lat: number, lon: number, accuracyM: number | null): void;
 }
 
 export interface PhoneView {
@@ -72,10 +81,12 @@ const gray = (level: number) => {
 };
 
 export function initPhone(state: Readonly<HudState>, actions: PhoneActions): PhoneView {
+  const sim = new AlignSim();
   const map = new HudMap(byId('map'), {
     onTap: openSheet,
     onWaypointTap: (i) => actions.select(i),
     onWaypointDrag: (i, lat, lon) => actions.move(i, lat, lon),
+    onAlignDrag: (lat, lon) => actions.setAlignPoint({ lat, lon }),
   });
 
   // ---- Map toolbar and tap-to-place sheet ----
@@ -100,7 +111,7 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
     }
     setText('sheet-coords', where);
     sheetName.placeholder = actions.nextName();
-    byId('sheet-sim').hidden = state.gps !== 'unavailable';
+    byId('sheet-sim').hidden = state.gps !== 'unavailable' && !sim.running;
     sheet.hidden = false;
   }
 
@@ -117,10 +128,38 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
     closeSheet();
   });
   byId('sheet-sim').addEventListener('click', () => {
-    if (draft) actions.setSimPosition(draft.lat, draft.lon);
+    if (draft && sim.running) sim.truePos = { ...draft };
+    else if (draft) actions.setSimPosition(draft.lat, draft.lon);
+    closeSheet();
+  });
+  byId('sheet-align').addEventListener('click', () => {
+    if (draft) actions.setAlignPoint(draft);
     closeSheet();
   });
   byId('sheet-cancel').addEventListener('click', closeSheet);
+
+  // ---- Heading align ----
+  byId('btn-align').addEventListener('click', () => actions.align());
+  byId('btn-align-clear').addEventListener('click', () => actions.setAlignPoint(null));
+
+  function renderAlign() {
+    const target = alignTarget(state);
+    let info = 'No align point. Tap a distant landmark on the map and choose “Set as align point”.';
+    if (state.alignPoint && !target) info = 'Waiting for a GPS fix.';
+    else if (target) {
+      const where = `${formatRange(target.distM)} at ${deg3(target.bearing)}°`;
+      if (target.distM < MIN_ALIGN_M) info = `${where} — too close, pick something farther away.`;
+      else {
+        const err = state.accuracyM ? (Math.atan(state.accuracyM / target.distM) * 180) / Math.PI : null;
+        info = err === null ? where : `${where}  ·  about ±${Math.max(1, Math.round(err))}° from GPS error`;
+      }
+    }
+    setText('align-info', info);
+    const status = byId('align-status');
+    status.textContent = state.headingAligned ? 'ALIGNED' : 'NOT ALIGNED';
+    status.className = `count ${state.headingAligned ? 'ok' : 'warn'}`;
+    byId('btn-align-clear').hidden = !state.alignPoint;
+  }
 
   // ---- Steering, marking, trail ----
   byId('btn-prev').addEventListener('click', () => actions.cycle(-1));
@@ -157,9 +196,77 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
       apply(Number(input.value));
     });
   };
-  bindSlider('sim-yaw', 'lbl-yaw', (heading) => actions.setHeadPose({ heading }));
+  bindSlider('sim-yaw', 'lbl-yaw', (heading) => {
+    // In the alignment sim the slider is where the head really points; the sim makes up the IMU reading.
+    if (sim.running) sim.trueHeading = heading;
+    else actions.setHeadPose({ heading });
+  });
   bindSlider('sim-pitch', 'lbl-pitch', (pitch) => actions.setHeadPose({ pitch }));
   bindSlider('sim-roll', 'lbl-roll', (roll) => actions.setHeadPose({ roll }));
+
+  // ---- Realistic alignment sim ----
+  const yawInput = byId<HTMLInputElement>('sim-yaw');
+  const IMU_DEADBAND_DEG = 0.5; // Same as the real IMU path, so the HUD isn't re-sent on noise.
+  const SIM_TICK_MS = 50;
+  const SIM_GPS_MS = 1000;
+  let simTimer: ReturnType<typeof setInterval> | undefined;
+  let lastYaw = Number.NaN;
+  let lastFixAt = 0;
+
+  function setTrueHeading(deg: number) {
+    const value = Math.round(normalizeDeg(deg));
+    sim.trueHeading = normalizeDeg(deg);
+    yawInput.value = String(value);
+    setText('lbl-yaw', String(value));
+  }
+
+  function simTick() {
+    const now = performance.now();
+    const yaw = sim.rawYaw(now);
+    if (Number.isNaN(lastYaw) || Math.abs(angleDiff(yaw, lastYaw)) >= IMU_DEADBAND_DEG) {
+      lastYaw = yaw;
+      actions.setHeadPose({ heading: yaw });
+    }
+    if (now - lastFixAt >= SIM_GPS_MS) {
+      lastFixAt = now;
+      const fix = sim.nextFix();
+      actions.simFix(fix.lat, fix.lon, sim.gpsErrorM);
+    }
+    refresh();
+  }
+
+  const startButton = byId('btn-sim-start');
+  startButton.addEventListener('click', () => {
+    if (sim.running) {
+      sim.stop();
+      clearInterval(simTimer);
+      actions.simFix(sim.truePos.lat, sim.truePos.lon, null);
+      actions.setHeadPose({ heading: Number(yawInput.value) });
+      actions.resetAlignment();
+    } else {
+      sim.start({ lat: state.lat, lon: state.lon }, Number(yawInput.value), performance.now());
+      lastYaw = Number.NaN;
+      lastFixAt = 0;
+      simTick();
+      actions.resetAlignment();
+      simTimer = setInterval(simTick, SIM_TICK_MS);
+    }
+    startButton.textContent = sim.running ? 'STOP SIM' : 'START SIM';
+    mirror.classList.toggle('sim-world', sim.running);
+    refresh();
+  });
+  bindSlider('sim-drift', 'lbl-drift', (v) => (sim.driftDegPerMin = v));
+  bindSlider('sim-gpserr', 'lbl-gpserr', (v) => (sim.gpsErrorM = v));
+
+  function renderSim() {
+    if (!sim.running) {
+      setText('sim-truth', '');
+      return;
+    }
+    const err = angleDiff(state.heading, sim.trueHeading);
+    const errText = Math.abs(err) < 0.5 ? '0°' : `${err > 0 ? '+' : '−'}${Math.abs(err).toFixed(1)}°`;
+    setText('sim-truth', `REALLY FACING ${deg3(sim.trueHeading)}°  ·  HUD SAYS ${deg3(state.heading)}°  ·  ERROR ${errText}`);
+  }
 
   // ---- Waypoint list ----
   const list = byId('wp-list');
@@ -269,13 +376,33 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
   const imageCtx = imageCanvas.getContext('2d');
   const textBoxes = buildPageLayout().textObject ?? [];
 
+  // In the sim, dragging the glasses view turns the head, like grabbing the scenery.
+  let drag: { x: number; heading: number } | null = null;
+  mirror.addEventListener('pointerdown', (e) => {
+    if (!sim.running) return;
+    drag = { x: e.clientX, heading: sim.trueHeading };
+    mirror.setPointerCapture(e.pointerId);
+  });
+  mirror.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const canvasPx = ((e.clientX - drag.x) * mirror.width) / mirror.getBoundingClientRect().width;
+    setTrueHeading(drag.heading - canvasPx / WORLD_PX_PER_DEG);
+  });
+  const endDrag = () => (drag = null);
+  mirror.addEventListener('pointerup', endDrag);
+  mirror.addEventListener('pointercancel', endDrag);
+
   function drawMirror() {
     if (!mirrorCtx || !imageCtx) return;
     const ctx = mirrorCtx;
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, mirror.width, mirror.height);
+    if (sim.running) sim.drawWorld(ctx, state.alignPoint, state.pitch);
     drawHudImage(imageCtx, hudImageView(state));
+    // The display adds light on top of the world, so the HUD's black background is see-through.
+    ctx.globalCompositeOperation = 'lighten';
     ctx.drawImage(imageCanvas, HUD_IMAGE.x, HUD_IMAGE.y);
+    ctx.globalCompositeOperation = 'source-over';
 
     const live = new Map(hudTexts(state).map((t) => [t.id, t]));
     ctx.font = MIRROR_FONT;
@@ -330,7 +457,7 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
     const live = state.gps === 'live';
     setText('t-gs', live ? (state.speedMps * MPH_PER_MPS).toFixed(1) : '—');
     setText('t-alt', live && state.altitudeM !== null ? String(Math.round(state.altitudeM * FT_PER_M)) : '—');
-    setText('t-hdg', `${deg3(state.heading)}°`);
+    setText('t-hdg', `${deg3(state.heading)}°${state.headingAligned ? '' : ' REL'}`);
     setText('t-pitch', signedDeg(state.pitch));
     setText('t-roll', signedDeg(state.roll));
     setText('t-pos', `${state.lat.toFixed(5)}, ${state.lon.toFixed(5)}`);
@@ -340,6 +467,8 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
     renderStatus();
     renderSteer();
     renderTelemetry();
+    renderAlign();
+    renderSim();
     drawMirror();
     map.update(state);
     renderList();
