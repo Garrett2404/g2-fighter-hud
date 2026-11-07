@@ -1,0 +1,19 @@
+{
+  "package_id": "com.garrett.fighterhud",
+  "edition": "202601",
+  "name": "Fighter HUD",
+  "version": "0.1.0",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.9",
+  "entrypoint": "index.html",
+  "tagline": "Tactical Avionics HUD & Waypoint Tracker",
+  "description": "Real-time compass tape, pitch ladder, ground speed, and GPS waypoint markers.",
+  "author": "Garrett",
+  "permissions": [
+    "network",
+    "location"
+  ],
+  "supported_hardware": [
+    "g2"
+  ]
+}

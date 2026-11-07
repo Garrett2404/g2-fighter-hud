@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fighter HUD Companion</title>
+  <style>
+    body {
+      background: #0a0f0d;
+      color: #00ff66;
+      font-family: monospace;
+      padding: 16px;
+      margin: 0;
+    }
+    h2 { margin-top: 0; border-bottom: 1px solid #00ff66; padding-bottom: 8px; }
+    .card {
+      border: 1px solid #1a3a2a;
+      background: #0f1914;
+      padding: 12px;
+      margin-bottom: 16px;
+      border-radius: 6px;
+    }
+    input, button {
+      background: #050a08;
+      color: #00ff66;
+      border: 1px solid #00ff66;
+      padding: 8px;
+      font-family: monospace;
+      margin: 4px 0;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    button {
+      background: #003314;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    button:active { background: #00ff66; color: #000; }
+    .wp-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      border-bottom: 1px dashed #1a3a2a;
+    }
+    .wp-item button { width: auto; padding: 4px 8px; border-color: #ff4444; color: #ff4444; background: transparent; }
+  </style>
+</head>
+<body>
+  <h2>AVIONICS HUD CONTROL</h2>
+
+  <div class="card">
+    <div><strong>LIVE TELEMETRY</strong></div>
+    <div id="telemetry-readout">Waiting for bridge...</div>
+    <button id="btn-drop-here" style="margin-top: 8px;">+ DROP PIN AT MY LOCATION</button>
+  </div>
+
+  <div class="card">
+    <div><strong>ADD CUSTOM WAYPOINT</strong></div>
+    <input id="wp-name" type="text" placeholder="Callsign (e.g. HOME, TRUCK)" maxlength="5" />
+    <input id="wp-lat" type="number" step="any" placeholder="Latitude (e.g. 36.9542)" />
+    <input id="wp-lon" type="number" step="any" placeholder="Longitude (e.g. -93.9277)" />
+    <button id="btn-add-wp">SAVE WAYPOINT</button>
+  </div>
+
+  <div class="card">
+    <div><strong>ACTIVE WAYPOINTS</strong></div>
+    <div id="wp-list"></div>
+  </div>
+
+  <div class="card">
+    <div><strong>SIMULATOR OVERRIDE (TEST YAW/PITCH)</strong></div>
+    <label>Head Yaw (0-359°): <span id="lbl-yaw">0</span>°</label>
+    <input id="sim-yaw" type="range" min="0" max="359" value="0" />
+    <label>Head Pitch (-45 to +45°): <span id="lbl-pitch">0</span>°</label>
+    <input id="sim-pitch" type="range" min="-45" max="45" value="0" />
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

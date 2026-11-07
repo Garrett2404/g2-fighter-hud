@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output
+/dist/
+/.vite/
+*.ehpk
+
+# Local environment
+.env
+.env.*
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Optional: keep lockfile tracked
+# package-lock.json
