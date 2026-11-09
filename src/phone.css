@@ -152,6 +152,7 @@ button { cursor: pointer; }
 .self-dot { fill: var(--green); stroke: #00140a; stroke-width: 3; }
 .self-icon.sim .self-cone { fill: rgba(255, 201, 77, 0.14); stroke: var(--amber); stroke-dasharray: 4 3; }
 .self-icon.sim .self-dot { fill: var(--amber); }
+.self-icon.no-heading .self-cone { display: none; }
 
 /* ---- Cards ---- */
 .content { padding: 12px; display: grid; gap: 12px; max-width: 720px; margin: 0 auto; }

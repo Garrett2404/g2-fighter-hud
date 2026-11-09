@@ -77,11 +77,26 @@
     </section>
 
     <section class="card">
-      <h2>HEADING ALIGN <span id="align-status" class="count warn">NOT ALIGNED</span></h2>
+      <h2>HEAD TRACKING <span id="level-status" class="count warn">NOT LEVELED</span></h2>
+      <p class="sub">
+        Pitch and roll come from the glasses' accelerometer. Level once for the way your glasses sit:
+        choose <b>Level HUD</b> from the glasses menu, look at the horizon and hold still, then look up
+        and hold still.
+      </p>
+      <p id="imu-info" class="sub"></p>
+      <p id="link-info" class="sub"></p>
+      <button id="btn-level" type="button" class="primary">LEVEL HUD</button>
+      <p class="sub">From the phone, leveling starts 4 seconds after you tap, so you can look up first.</p>
+    </section>
+
+    <section class="card">
+      <h2>HEADING <span id="align-status" class="count warn">NO HEADING</span></h2>
       <p id="align-info" class="sub"></p>
       <p class="sub">
-        The glasses have no compass. Look at the align point so it sits behind the center of the
-        waterline, then choose <b>Align heading</b> from the glasses menu (or tap below).
+        The G2 has no compass or gyro, so it can't tell which way your head turns. While you move,
+        heading follows your GPS track (TRK) and is held when you stop (HLD). Standing still, face the
+        align point so it sits behind the center of the waterline, then choose <b>Align heading</b>
+        from the glasses menu (or tap below). The HUD holds that heading (ALN) until you move.
         Farther points are more accurate.
       </p>
       <div class="row between">
@@ -118,30 +133,31 @@
         <li><b>Tap</b> next waypoint</li>
         <li><b>Swipe up / down</b> previous / next waypoint</li>
         <li><b>Press and hold</b> mark your position</li>
-        <li><b>Tap, then hold</b> menu: mark, next, previous, delete, align heading</li>
+        <li><b>Tap, then hold</b> menu: mark, next, previous, delete, align heading, level HUD</li>
         <li><b>Double-tap</b> exit</li>
       </ul>
     </details>
 
-    <details class="card">
+    <details id="sim-panel" class="card">
       <summary>SIMULATOR / TEST</summary>
       <p class="sub">
-        The simulator has no GPS or head tracking. Tap the map and choose “Move sim position here”,
-        then use the sliders to turn your head.
+        The simulator has no GPS or head tracking. Tap the map and choose “Move sim position here”.
+        Heading stands in for a GPS track; while this panel is open, pitch and roll drive a stand-in for
+        the glasses' accelerometer (real glasses take over when connected).
       </p>
-      <label>Head yaw <span id="lbl-yaw">0</span>°<input id="sim-yaw" type="range" min="0" max="359" value="0" /></label>
+      <label>Heading <span id="lbl-yaw">0</span>°<input id="sim-yaw" type="range" min="0" max="359" value="0" /></label>
       <label>Head pitch <span id="lbl-pitch">0</span>°<input id="sim-pitch" type="range" min="-45" max="45" value="0" /></label>
       <label>Head roll <span id="lbl-roll">0</span>°<input id="sim-roll" type="range" min="-60" max="60" value="0" /></label>
 
       <div class="sub-panel">
         <span class="label">REALISTIC ALIGNMENT SIM</span>
         <p class="sub">
-          Behaves like real glasses: the head sensor starts pointed at a random unknown direction and
-          slowly drifts, and GPS wanders. The yaw slider (or dragging the glasses view sideways) becomes
-          where your head <i>really</i> points. The gray tower in the glasses view is the real landmark at
-          your align point, drawn at the G2's true scale. Set an align point first, then start.
+          Behaves like real glasses: they sit at a random, unknown tilt on your nose (so the HUD needs
+          leveling), nothing senses which way your head turns, and GPS wanders. The heading slider (or
+          dragging the glasses view sideways) becomes where your head <i>really</i> points. The gray
+          tower in the glasses view is the real landmark at your align point, drawn at the G2's true
+          scale. Set an align point first, then start.
         </p>
-        <label>Gyro drift <span id="lbl-drift">1</span>°/min<input id="sim-drift" type="range" min="0" max="10" step="0.5" value="1" /></label>
         <label>GPS error <span id="lbl-gpserr">5</span> m<input id="sim-gpserr" type="range" min="0" max="30" value="5" /></label>
         <button id="btn-sim-start" type="button" class="primary block">START SIM</button>
       </div>

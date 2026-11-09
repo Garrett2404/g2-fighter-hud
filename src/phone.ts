@@ -1,6 +1,8 @@
 import {
   ARRIVED_M,
+  HEADING_TAG,
   HUD_IMAGE,
+  type HeadingSource,
   type HudState,
   type LatLon,
   MIN_ALIGN_M,
@@ -25,6 +27,7 @@ import {
   normalizeDeg,
   parseLatLon,
 } from './hud-math';
+import { readingFor, type Vec3 } from './head-tracker';
 import { HudMap } from './phone-map';
 import { AlignSim, WORLD_PX_PER_DEG } from './align-sim';
 import './phone.css';
@@ -39,10 +42,13 @@ export interface PhoneActions {
   markHere(): void;
   nextName(): string;
   setSimPosition(lat: number, lon: number): void;
-  setHeadPose(pose: { heading?: number; pitch?: number; roll?: number }): void;
+  setSimHeading(deg: number): void;
+  /** A stand-in accelerometer sample from the test sliders. */
+  simImu(sample: Vec3): void;
   setAlignPoint(point: LatLon | null): void;
   align(): void;
-  resetAlignment(): void;
+  level(): void;
+  resetHeading(): void;
   simFix(lat: number, lon: number, accuracyM: number | null): void;
 }
 
@@ -56,6 +62,13 @@ const DELETE_ARM_MS = 3000;
 // Rough stand-in for the glasses' firmware font in the mirror preview.
 const MIRROR_FONT = '21px "Helvetica Neue", Helvetica, Arial, sans-serif';
 const MIRROR_LINE_PX = 27;
+const HEADING_TEXT: Record<HeadingSource, string> = {
+  none: 'NO HEADING',
+  track: 'GPS TRACK',
+  held: 'HELD',
+  aligned: 'ALIGNED',
+  sim: 'SIMULATED',
+};
 
 function byId<T extends HTMLElement = HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -73,8 +86,8 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
 const setText = (id: string, text: string) => (byId(id).textContent = text);
 const deg3 = (deg: number) => String(Math.round(normalizeDeg(deg)) % 360).padStart(3, '0');
 const signedDeg = (deg: number) => `${deg >= 0 ? '+' : ''}${Math.round(deg)}°`;
-const turnText = (turn: number) =>
-  Math.abs(turn) < 3 ? 'AHEAD' : `${turn < 0 ? 'L' : 'R'} ${Math.round(Math.abs(turn))}°`;
+const turnText = (turn: number | null) =>
+  turn === null ? '—' : Math.abs(turn) < 3 ? 'AHEAD' : `${turn < 0 ? 'L' : 'R'} ${Math.round(Math.abs(turn))}°`;
 const gray = (level: number) => {
   const v = Math.round(255 * Math.min(1, Math.max(0, level)));
   return `rgb(${v},${v},${v})`;
@@ -156,9 +169,33 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
     }
     setText('align-info', info);
     const status = byId('align-status');
-    status.textContent = state.headingAligned ? 'ALIGNED' : 'NOT ALIGNED';
-    status.className = `count ${state.headingAligned ? 'ok' : 'warn'}`;
+    status.textContent = HEADING_TEXT[state.headingSource];
+    status.className = `count ${state.headingSource === 'none' ? 'warn' : 'ok'}`;
     byId('btn-align-clear').hidden = !state.alignPoint;
+  }
+
+  // ---- Head tracking: LEVEL and sensor health ----
+  byId('btn-level').addEventListener('click', () => actions.level());
+
+  function renderLevel() {
+    const status = byId('level-status');
+    status.textContent = state.levelStep ? 'LEVELING' : state.leveled ? 'LEVELED' : 'NOT LEVELED';
+    status.className = `count ${state.leveled && !state.levelStep ? 'ok' : 'warn'}`;
+    const d = state.diag;
+    const imu = {
+      starting: 'IMU: waiting for the glasses…',
+      live: `IMU: live, ${d.imuHz}/s`,
+      silent: 'IMU: no samples, restarting it…',
+      none: 'IMU: none here (simulator), use the test sliders',
+    }[d.imu];
+    const raw = d.raw ? `  ·  x ${d.raw[0].toFixed(3)}  y ${d.raw[1].toFixed(3)}  z ${d.raw[2].toFixed(3)}` : '';
+    setText('imu-info', imu + raw);
+    setText(
+      'link-info',
+      d.imageFailures > 0
+        ? `HUD image: ${d.imageFailures} failed sends in a row`
+        : `HUD image: ${d.frameMs === null ? '—' : `${d.frameMs} ms per frame`}`
+    );
   }
 
   // ---- Steering, marking, trail ----
@@ -189,28 +226,26 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
   });
 
   // ---- Simulator head-pose sliders ----
-  const bindSlider = (inputId: string, labelId: string, apply: (value: number) => void) => {
+  const bindSlider = (inputId: string, labelId: string, apply?: (value: number) => void) => {
     const input = byId<HTMLInputElement>(inputId);
     input.addEventListener('input', () => {
       setText(labelId, input.value);
-      apply(Number(input.value));
+      apply?.(Number(input.value));
     });
+    return input;
   };
-  bindSlider('sim-yaw', 'lbl-yaw', (heading) => {
-    // In the alignment sim the slider is where the head really points; the sim makes up the IMU reading.
+  const yawInput = bindSlider('sim-yaw', 'lbl-yaw', (heading) => {
+    // In the alignment sim the slider is where the head really points, which nothing on the glasses senses.
     if (sim.running) sim.trueHeading = heading;
-    else actions.setHeadPose({ heading });
+    else actions.setSimHeading(heading);
   });
-  bindSlider('sim-pitch', 'lbl-pitch', (pitch) => actions.setHeadPose({ pitch }));
-  bindSlider('sim-roll', 'lbl-roll', (roll) => actions.setHeadPose({ roll }));
+  const pitchInput = bindSlider('sim-pitch', 'lbl-pitch');
+  const rollInput = bindSlider('sim-roll', 'lbl-roll');
+  const simPanel = byId<HTMLDetailsElement>('sim-panel');
 
   // ---- Realistic alignment sim ----
-  const yawInput = byId<HTMLInputElement>('sim-yaw');
-  const IMU_DEADBAND_DEG = 0.5; // Same as the real IMU path, so the HUD isn't re-sent on noise.
-  const SIM_TICK_MS = 50;
+  const SIM_TICK_MS = 100;
   const SIM_GPS_MS = 1000;
-  let simTimer: ReturnType<typeof setInterval> | undefined;
-  let lastYaw = Number.NaN;
   let lastFixAt = 0;
 
   function setTrueHeading(deg: number) {
@@ -220,42 +255,37 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
     setText('lbl-yaw', String(value));
   }
 
-  function simTick() {
+  // While the test panel is open (or the sim runs), the pitch and roll sliders drive a stand-in accelerometer
+  // at the real one's rate, so LEVEL works the same way as on the glasses.
+  setInterval(() => {
+    if (!simPanel.open && !sim.running) return;
+    const pitch = Number(pitchInput.value);
+    const roll = Number(rollInput.value);
+    actions.simImu(sim.running ? sim.reading(pitch, roll) : readingFor(pitch, roll));
+    if (!sim.running) return;
     const now = performance.now();
-    const yaw = sim.rawYaw(now);
-    if (Number.isNaN(lastYaw) || Math.abs(angleDiff(yaw, lastYaw)) >= IMU_DEADBAND_DEG) {
-      lastYaw = yaw;
-      actions.setHeadPose({ heading: yaw });
-    }
     if (now - lastFixAt >= SIM_GPS_MS) {
       lastFixAt = now;
       const fix = sim.nextFix();
       actions.simFix(fix.lat, fix.lon, sim.gpsErrorM);
     }
     refresh();
-  }
+  }, SIM_TICK_MS);
 
   const startButton = byId('btn-sim-start');
   startButton.addEventListener('click', () => {
     if (sim.running) {
       sim.stop();
-      clearInterval(simTimer);
       actions.simFix(sim.truePos.lat, sim.truePos.lon, null);
-      actions.setHeadPose({ heading: Number(yawInput.value) });
-      actions.resetAlignment();
     } else {
-      sim.start({ lat: state.lat, lon: state.lon }, Number(yawInput.value), performance.now());
-      lastYaw = Number.NaN;
+      sim.start({ lat: state.lat, lon: state.lon }, Number(yawInput.value));
       lastFixAt = 0;
-      simTick();
-      actions.resetAlignment();
-      simTimer = setInterval(simTick, SIM_TICK_MS);
     }
+    actions.resetHeading();
     startButton.textContent = sim.running ? 'STOP SIM' : 'START SIM';
     mirror.classList.toggle('sim-world', sim.running);
     refresh();
   });
-  bindSlider('sim-drift', 'lbl-drift', (v) => (sim.driftDegPerMin = v));
   bindSlider('sim-gpserr', 'lbl-gpserr', (v) => (sim.gpsErrorM = v));
 
   function renderSim() {
@@ -263,9 +293,13 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
       setText('sim-truth', '');
       return;
     }
-    const err = angleDiff(state.heading, sim.trueHeading);
-    const errText = Math.abs(err) < 0.5 ? '0°' : `${err > 0 ? '+' : '−'}${Math.abs(err).toFixed(1)}°`;
-    setText('sim-truth', `REALLY FACING ${deg3(sim.trueHeading)}°  ·  HUD SAYS ${deg3(state.heading)}°  ·  ERROR ${errText}`);
+    const errText = (err: number) => (Math.abs(err) < 0.5 ? '0°' : `${err > 0 ? '+' : '−'}${Math.abs(err).toFixed(1)}°`);
+    const hdg =
+      state.headingSource === 'none'
+        ? 'HUD HAS NO HEADING'
+        : `HUD SAYS ${deg3(state.heading)}°  ·  ERROR ${errText(angleDiff(state.heading, sim.trueHeading))}`;
+    const pitchErr = errText(state.pitch - Number(pitchInput.value));
+    setText('sim-truth', `REALLY FACING ${deg3(sim.trueHeading)}°  ·  ${hdg}  ·  PITCH ERROR ${pitchErr}`);
   }
 
   // ---- Waypoint list ----
@@ -397,7 +431,8 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
     const ctx = mirrorCtx;
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, mirror.width, mirror.height);
-    if (sim.running) sim.drawWorld(ctx, state.alignPoint, state.pitch);
+    // The real horizon follows the true head pitch, not the HUD's estimate of it.
+    if (sim.running) sim.drawWorld(ctx, state.alignPoint, Number(pitchInput.value));
     drawHudImage(imageCtx, hudImageView(state));
     // The display adds light on top of the world, so the HUD's black background is see-through.
     ctx.globalCompositeOperation = 'lighten';
@@ -457,7 +492,7 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
     const live = state.gps === 'live';
     setText('t-gs', live ? (state.speedMps * MPH_PER_MPS).toFixed(1) : '—');
     setText('t-alt', live && state.altitudeM !== null ? String(Math.round(state.altitudeM * FT_PER_M)) : '—');
-    setText('t-hdg', `${deg3(state.heading)}°${state.headingAligned ? '' : ' REL'}`);
+    setText('t-hdg', state.headingSource === 'none' ? '—' : `${deg3(state.heading)}° ${HEADING_TAG[state.headingSource]}`);
     setText('t-pitch', signedDeg(state.pitch));
     setText('t-roll', signedDeg(state.roll));
     setText('t-pos', `${state.lat.toFixed(5)}, ${state.lon.toFixed(5)}`);
@@ -468,6 +503,7 @@ export function initPhone(state: Readonly<HudState>, actions: PhoneActions): Pho
     renderSteer();
     renderTelemetry();
     renderAlign();
+    renderLevel();
     renderSim();
     drawMirror();
     map.update(state);

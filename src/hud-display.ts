@@ -16,8 +16,17 @@ import {
   getDistanceMeters,
   normalizeDeg,
 } from './hud-math';
+import type { LevelStep } from './head-tracker';
 
 export type GpsState = 'waiting' | 'live' | 'unavailable';
+
+/**
+ * The glasses can't sense yaw, so heading is the GPS track while moving (then held when you stop),
+ * set by facing the align point, or set by the simulator's slider.
+ */
+export type HeadingSource = 'none' | 'track' | 'held' | 'aligned' | 'sim';
+
+export const HEADING_TAG: Record<HeadingSource, string> = { none: '', track: 'TRK', held: 'HLD', aligned: 'ALN', sim: 'SIM' };
 
 export interface GlassesStatus {
   connected: boolean;
@@ -29,16 +38,31 @@ export interface LatLon {
   lon: number;
 }
 
+/** Sensor and link health, shown on the phone because there are no devtools there. */
+export interface Diagnostics {
+  /** 'none' when the host has no IMU (the simulator). */
+  imu: 'starting' | 'live' | 'silent' | 'none';
+  imuHz: number;
+  /** Last raw accelerometer sample. */
+  raw: [number, number, number] | null;
+  /** Duration of the last HUD image send. */
+  frameMs: number | null;
+  imageFailures: number;
+}
+
 export interface HudState {
-  /** True-north heading once aligned; before that, relative to wherever the IMU happened to zero. */
+  /** True-north degrees; meaningless while headingSource is 'none'. */
   heading: number;
-  headingAligned: boolean;
-  /** Distant landmark used to align the heading to true north. */
+  headingSource: HeadingSource;
+  /** Distant landmark the wearer faces to set the heading. */
   alignPoint: LatLon | null;
   /** Degrees, positive = looking up. */
   pitch: number;
   /** Degrees, positive = right ear down. */
   roll: number;
+  /** Whether pitch and roll use a LEVEL calibration rather than the default guess. */
+  leveled: boolean;
+  levelStep: LevelStep | null;
   lat: number;
   lon: number;
   gps: GpsState;
@@ -52,6 +76,7 @@ export interface HudState {
   message: string;
   showHints: boolean;
   glasses: GlassesStatus | null;
+  diag: Diagnostics;
 }
 
 interface Box {
@@ -75,7 +100,7 @@ const TEXT = {
   status: { id: 8, name: 'hud_status', x: 24, y: 248, w: 528, h: 34 },
 } satisfies Record<string, Box>;
 
-export const MENU = { mark: 1, next: 2, prev: 3, delete: 4, align: 5 } as const;
+export const MENU = { mark: 1, next: 2, prev: 3, delete: 4, align: 5, level: 6 } as const;
 
 // Closer than this, GPS noise makes the bearing to a waypoint meaningless.
 export const ARRIVED_M = 10;
@@ -83,6 +108,11 @@ const BRIGHT = 4;
 const DIM = 2;
 const VALUE_BORDER = 2;
 const VALUE_PADDING = 4;
+const IMAGE_FAILURE_WARN = 3;
+const LEVEL_PROMPT: Record<LevelStep, string> = {
+  horizon: 'LEVEL 1/2  ·  LOOK AT THE HORIZON, HOLD STILL',
+  up: 'LEVEL 2/2  ·  NOW LOOK UP, HOLD STILL',
+};
 
 export function buildPageLayout(): Partial<CreateStartUpPageContainer> {
   const text = (box: Box, content: string, extra: Partial<TextContainerProperty> = {}) =>
@@ -128,6 +158,7 @@ export function buildPageLayout(): Partial<CreateStartUpPageContainer> {
         new MenuItemProperty({ itemName: 'Previous waypoint', itemID: MENU.prev }),
         new MenuItemProperty({ itemName: 'Delete waypoint', itemID: MENU.delete }),
         new MenuItemProperty({ itemName: 'Align heading', itemID: MENU.align }),
+        new MenuItemProperty({ itemName: 'Level HUD', itemID: MENU.level }),
       ],
     }),
   };
@@ -159,8 +190,8 @@ export interface SteerInfo {
   count: number;
   distM: number;
   bearing: number;
-  /** Turn from the current head heading, -180..180 (positive = right). */
-  turn: number;
+  /** Turn from the current heading, -180..180 (positive = right); null without a heading. */
+  turn: number | null;
   /** Seconds to arrive at the current ground speed; null when stopped. */
   eteS: number | null;
 }
@@ -171,7 +202,8 @@ export function steerInfo(s: HudState): SteerInfo | null {
   const distM = getDistanceMeters(s.lat, s.lon, waypoint.lat, waypoint.lon);
   const bearing = getBearingDeg(s.lat, s.lon, waypoint.lat, waypoint.lon);
   const eteS = s.speedMps > 0.5 && distM / s.speedMps < 100 * 3600 ? distM / s.speedMps : null;
-  return { waypoint, index: s.selected, count: s.waypoints.length, distM, bearing, turn: angleDiff(bearing, s.heading), eteS };
+  const turn = s.headingSource === 'none' ? null : angleDiff(bearing, s.heading);
+  return { waypoint, index: s.selected, count: s.waypoints.length, distM, bearing, turn, eteS };
 }
 
 function steerLine(s: HudState): string {
@@ -200,10 +232,14 @@ export function hudTexts(s: HudState): TextUpdate[] {
 
   let status = { content: ' ', textColor: DIM };
   if (s.message) status = { content: s.message, textColor: BRIGHT };
-  else if (s.showHints) status = { content: 'TAP  NEXT WPT  ·  HOLD  MARK  ·  DOUBLE-TAP  EXIT', textColor: DIM };
-  else if (!s.headingAligned) {
-    const how = s.alignPoint ? 'LOOK AT POINT  ·  MENU  ALIGN' : 'SET ALIGN POINT ON PHONE';
-    status = { content: `HDG NOT ALIGNED  ·  ${how}`, textColor: DIM };
+  else if (s.levelStep) status = { content: LEVEL_PROMPT[s.levelStep], textColor: BRIGHT };
+  else if (s.diag.imageFailures >= IMAGE_FAILURE_WARN) {
+    status = { content: 'HUD IMAGE NOT UPDATING  ·  RESTART APP', textColor: BRIGHT };
+  } else if (s.showHints) status = { content: 'TAP  NEXT WPT  ·  HOLD  MARK  ·  DOUBLE-TAP  EXIT', textColor: DIM };
+  else if (!s.leveled) status = { content: 'HUD NOT LEVELED  ·  MENU > LEVEL HUD', textColor: DIM };
+  else if (s.headingSource === 'none') {
+    const how = s.alignPoint ? 'WALK, OR MENU > ALIGN HEADING' : 'WALK, OR SET ALIGN POINT';
+    status = { content: `NO HEADING  ·  ${how}`, textColor: DIM };
   }
 
   return [
@@ -226,7 +262,10 @@ export interface TapeMarker {
 }
 
 export interface HudImageView {
-  heading: number;
+  /** Null when there is no heading source yet. */
+  heading: number | null;
+  /** Where the heading comes from, e.g. TRK; empty when there is none. */
+  headingTag: string;
   pitch: number;
   roll: number;
   markers: TapeMarker[];
@@ -248,17 +287,25 @@ const round1 = (v: number) => Math.round(v * 10) / 10;
 
 /** Everything the image depends on, rounded so identical frames can be skipped. */
 export function hudImageView(s: HudState): HudImageView {
+  const known = s.headingSource !== 'none';
   const markers: TapeMarker[] = [];
-  if (s.gps !== 'waiting') {
+  if (known && s.gps !== 'waiting') {
     s.waypoints.forEach((wp, i) => {
       if (getDistanceMeters(s.lat, s.lon, wp.lat, wp.lon) < ARRIVED_M) return;
       const rel = angleDiff(getBearingDeg(s.lat, s.lon, wp.lat, wp.lon), s.heading);
       markers.push({ name: wp.name, rel: round1(rel), selected: i === s.selected });
     });
   }
-  const target = alignTarget(s);
+  const target = known ? alignTarget(s) : null;
   const alignRel = target && target.distM >= ARRIVED_M ? round1(angleDiff(target.bearing, s.heading)) : null;
-  return { heading: round1(normalizeDeg(s.heading)), pitch: round1(s.pitch), roll: round1(s.roll), markers, alignRel };
+  return {
+    heading: known ? round1(normalizeDeg(s.heading)) : null,
+    headingTag: HEADING_TAG[s.headingSource],
+    pitch: round1(s.pitch),
+    roll: round1(s.roll),
+    markers,
+    alignRel,
+  };
 }
 
 const W = HUD_IMAGE.w;
@@ -269,6 +316,7 @@ const FG = '#ffffff';
 const FG_DIM = '#808080';
 const FONT = 'bold 14px Helvetica, Arial, sans-serif';
 const FONT_SMALL = 'bold 12px Helvetica, Arial, sans-serif';
+const FONT_TINY = 'bold 10px Helvetica, Arial, sans-serif';
 
 const TAPE_PX_PER_DEG = 4;
 export const TAPE_HALF_DEG = CX / TAPE_PX_PER_DEG;
@@ -302,25 +350,32 @@ function tapeLabel(deg: number): string {
   return cardinal[deg] ?? String(deg / 10).padStart(2, '0');
 }
 
-function drawTape(ctx: CanvasRenderingContext2D, heading: number) {
+function drawTape(ctx: CanvasRenderingContext2D, heading: number | null, tag: string) {
   ctx.lineWidth = 1;
   ctx.font = FONT_SMALL;
   ctx.textAlign = 'center';
-  const first = Math.ceil((heading - TAPE_HALF_DEG) / 5) * 5;
-  for (let d = first; d <= heading + TAPE_HALF_DEG; d += 5) {
-    const x = Math.round(CX + (d - heading) * TAPE_PX_PER_DEG) + 0.5;
-    const major = normalizeDeg(d) % 10 === 0;
-    line(ctx, x, 12, x, major ? 20 : 16);
-    if (major && Math.abs(x - CX) > 32 && Math.abs(x - CX) < CX - 10) {
-      ctx.fillText(tapeLabel(normalizeDeg(d)), x, 29);
+  if (heading !== null) {
+    const first = Math.ceil((heading - TAPE_HALF_DEG) / 5) * 5;
+    for (let d = first; d <= heading + TAPE_HALF_DEG; d += 5) {
+      const x = Math.round(CX + (d - heading) * TAPE_PX_PER_DEG) + 0.5;
+      const major = normalizeDeg(d) % 10 === 0;
+      line(ctx, x, 12, x, major ? 20 : 16);
+      if (major && Math.abs(x - CX) > 32 && Math.abs(x - CX) < CX - 10) {
+        ctx.fillText(tapeLabel(normalizeDeg(d)), x, 29);
+      }
     }
   }
 
   // Digital heading box with a caret pointing up at the tape.
   ctx.font = FONT;
   ctx.strokeRect(CX - 21.5, 21.5, 43, 17);
-  ctx.fillText(String(Math.round(heading) % 360).padStart(3, '0'), CX, 30.5);
+  ctx.fillText(heading === null ? '- - -' : String(Math.round(heading) % 360).padStart(3, '0'), CX, 30.5);
   triangle(ctx, [[CX, 13], [CX - 4, 21], [CX + 4, 21]], true);
+  // Sits in the gap between the ladder's left and right rungs.
+  ctx.font = FONT_TINY;
+  ctx.fillStyle = FG_DIM;
+  ctx.fillText(tag, CX, 48);
+  ctx.fillStyle = FG;
 }
 
 function drawMarkers(ctx: CanvasRenderingContext2D, markers: TapeMarker[]) {
@@ -467,7 +522,7 @@ export function drawHudImage(ctx: CanvasRenderingContext2D, v: HudImageView) {
   drawWaterline(ctx);
   drawBankScale(ctx, v.roll);
   if (v.alignRel !== null) drawAlignDiamond(ctx, v.alignRel, v.pitch);
-  drawTape(ctx, v.heading);
+  drawTape(ctx, v.heading, v.headingTag);
   drawMarkers(ctx, v.markers);
 }
 

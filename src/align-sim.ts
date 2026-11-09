@@ -1,10 +1,12 @@
 import { BORESIGHT_Y, HUD_IMAGE, type LatLon } from './hud-display';
-import { angleDiff, getBearingDeg, getDistanceMeters, normalizeDeg } from './hud-math';
+import { readingFor, type Vec3 } from './head-tracker';
+import { angleDiff, getBearingDeg, getDistanceMeters } from './hud-math';
 
 /*
- * Test-only stand-in for real glasses in the real world, so heading alignment can be practised
+ * Test-only stand-in for real glasses in the real world, so LEVEL and heading alignment can be practised
  * on the phone page or in the simulator:
- * - the IMU yaw starts at a random, unknown zero and slowly drifts, like a gyro without a compass;
+ * - the glasses sit at a random, unknown tilt on the nose, and the accelerometer is slightly noisy;
+ * - like the real G2, nothing senses which way the head turns;
  * - reported GPS wanders around the true position by roughly the chosen accuracy;
  * - the mirror shows the "real world" at the G2's true scale, with a tower at the align point.
  */
@@ -16,7 +18,9 @@ const HORIZON_Y = HUD_IMAGE.y + BORESIGHT_Y;
 const EDGE_HINT_Y = 160;
 const M_PER_DEG_LAT = 111_320;
 const GPS_CORRELATION = 0.9; // Per 1 s fix: GPS error wanders slowly rather than jumping.
-const IMU_NOISE_DEG = 0.15;
+const FIT_PITCH_DEG = 10;
+const FIT_ROLL_DEG = 3;
+const ACCEL_NOISE_G = 0.004;
 
 function gauss(): number {
   return Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
@@ -27,18 +31,16 @@ export class AlignSim {
   /** Where the head really points, degrees from true north. */
   trueHeading = 0;
   truePos: LatLon = { lat: 0, lon: 0 };
-  driftDegPerMin = 1;
   gpsErrorM = 5;
-  private imuZero = 0;
-  private startMs = 0;
+  /** How the glasses happen to sit on the nose, in degrees. */
+  fit = { pitch: 0, roll: 0 };
   private err = { n: 0, e: 0 };
 
-  start(pos: LatLon, trueHeading: number, nowMs: number) {
+  start(pos: LatLon, trueHeading: number) {
     this.running = true;
     this.truePos = { ...pos };
     this.trueHeading = trueHeading;
-    this.imuZero = Math.random() * 360;
-    this.startMs = nowMs;
+    this.fit = { pitch: (Math.random() * 2 - 1) * FIT_PITCH_DEG, roll: (Math.random() * 2 - 1) * FIT_ROLL_DEG };
     const sigma = this.sigma();
     this.err = { n: gauss() * sigma, e: gauss() * sigma };
   }
@@ -47,10 +49,9 @@ export class AlignSim {
     this.running = false;
   }
 
-  /** What the glasses IMU would report right now. */
-  rawYaw(nowMs: number): number {
-    const drift = (this.driftDegPerMin * (nowMs - this.startMs)) / 60_000;
-    return normalizeDeg(this.trueHeading - this.imuZero + drift + gauss() * IMU_NOISE_DEG);
+  /** What the glasses' accelerometer would report with the head really at this pitch and roll. */
+  reading(pitch: number, roll: number): Vec3 {
+    return readingFor(pitch + this.fit.pitch, roll + this.fit.roll).map((v) => v + gauss() * ACCEL_NOISE_G) as Vec3;
   }
 
   /** Next once-a-second GPS fix: the true position plus slowly wandering error. */

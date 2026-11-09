@@ -121,6 +121,7 @@ export class HudMap {
       this.self.setLatLng(position).addTo(this.map);
       const icon = this.self.getElement();
       icon?.classList.toggle('sim', s.gps === 'unavailable');
+      icon?.classList.toggle('no-heading', s.headingSource === 'none');
       const svg = icon?.querySelector<SVGElement>('svg');
       if (svg) svg.style.transform = `rotate(${s.heading}deg)`;
     } else {
